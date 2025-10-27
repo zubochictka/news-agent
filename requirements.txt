@@ -1,0 +1,6 @@
+feedparser
+deep-translator
+python-telegram-bot==22.5
+openai
+requests
+beautifulsoup4
