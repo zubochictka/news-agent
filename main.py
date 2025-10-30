@@ -1,152 +1,141 @@
-# main.py
 import os
 import asyncio
-import feedparser
+import logging
 from datetime import datetime
-from deep_translator import GoogleTranslator
+from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-import openai
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+)
+import aiohttp
 
-# ===== Получаем токены из переменных окружения (Replit Secrets) =====
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+# -----------------------------------------------
+# Загрузка переменных окружения (.env)
+# -----------------------------------------------
+load_dotenv()
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
-    print("❗ ПЕРЕД ПРОДОЛЖЕНИЕМ: установите TELEGRAM_TOKEN и OPENAI_API_KEY в переменных окружения.")
-    raise SystemExit(1)
+    print("❗ Убедись, что TELEGRAM_TOKEN и OPENAI_API_KEY заданы в .env или в Render → Environment.")
+    exit(1)
 
-openai.api_key = OPENAI_API_KEY
+# -----------------------------------------------
+# Логирование
+# -----------------------------------------------
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-# ===== Настройки =====
-CHECK_INTERVAL_SECONDS = 60  # опрос RSS каждые 60 секунд
-URL = "https://www.coindesk.com/arc/outboundfeeds/rss/"
-KEYWORDS = [
-    "bitcoin", "crypto", "ethereum", "blockchain",
-    "white house", "biden", "trump", "sec", "fed",
-    "interest rates", "inflation", "regulation", "us government"
-]
-
-translator = GoogleTranslator(source='en', target='ru')
-latest_title = None
-
-def log_news(title, summary, analysis):
-    with open("news_log.txt", "a", encoding="utf-8") as f:
-        f.write(f"\n{'='*60}\n")
-        f.write(f"{datetime.now().isoformat()}\n")
-        f.write(f"Заголовок: {title}\n")
-        f.write(f"Описание: {summary}\n")
-        f.write(f"Анализ:\n{analysis}\n")
-
-def get_latest_news():
-    global latest_title
-    feed = feedparser.parse(URL)
-    for entry in feed.entries:
-        text = f"{entry.title} {getattr(entry, 'summary', '')}".lower()
-        if any(k.lower() in text for k in KEYWORDS):
-            if latest_title != entry.title:
-                latest_title = entry.title
-                return entry
-    return None
-
-def analyze_with_gpt(title_ru: str, summary_ru: str) -> str:
-    prompt = f"""
-Новость (на русском): {title_ru}
-Краткое описание: {summary_ru}
-
-Проанализируй, как эта новость может повлиять на рынок криптовалют.
-1) Дай одно слово: Позитивное / Негативное / Нейтральное.
-2) Если в новости упоминается конкретная криптовалюта из топ-20 — укажи её название и дай рекомендацию: LONG или SHORT.
-3) Коротко (1-2 предложения) поясни причину.
-
-Ответ дай в формате:
-Влияние: <Позитивное/Негативное/Нейтральное>
-Монета: <название или 'нет'>
-Рекомендация: <LONG/SHORT/нет>
-Пояснение: <текст>
-"""
+# -----------------------------------------------
+# Фоновая проверка новостей
+# -----------------------------------------------
+async def fetch_latest_news():
+    """
+    Заглушка: получаем последние новости (в реальности — через API или парсер).
+    Здесь просто возвращаем фиктивную новость.
+    """
+    url = "https://api.currentsapi.services/v1/latest-news?language=en&apiKey=demo"
     try:
-        resp = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=200,
-            temperature=0.0
-        )
-        return resp['choices'][0]['message']['content'].strip()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                data = await resp.json()
+                if "news" in data and len(data["news"]) > 0:
+                    return data["news"][0]["title"]
+                return "No news found."
     except Exception as e:
-        return f"❌ Ошибка анализа GPT: {e}"
+        logger.error(f"Ошибка при получении новостей: {e}")
+        return None
+
 
 async def check_and_send_news(app):
-    print("🚀 Мониторинг новостей запущен.")
-    while getattr(app, "auto_check", True):
-        news = get_latest_news()
-        if news:
-            title_en = news.title
-            summary_en = getattr(news, "summary", "")
-            title_ru = translator.translate(title_en)
-            summary_ru = translator.translate(summary_en)
-            analysis = analyze_with_gpt(title_ru, summary_ru)
-            log_news(title_ru, summary_ru, analysis)
-            msg = (
-                f"📰 *Новая новость:*\n\n"
-                f"*{title_ru}*\n\n"
-                f"{summary_ru}\n\n"
-                f"🔗 {news.link}\n\n"
-                f"🤖 *Анализ ИИ:*\n{analysis}"
-            )
-            print(f"Отправляю новость: {title_en}")
-            for chat_id in app.chat_ids:
+    """Фоновая задача — проверяет новости каждые 5 минут и отправляет пользователям."""
+    bot_data = app.bot_data
+    logger.info("🔁 Фоновая проверка новостей запущена.")
+    last_sent = None
+
+    while bot_data.get("auto_check", True):
+        news_title = await fetch_latest_news()
+        if news_title and news_title != last_sent:
+            last_sent = news_title
+            for chat_id in bot_data.get("chat_ids", []):
                 try:
-                    await app.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                except Exception as ex:
-                    print("Ошибка отправки сообщения:", ex)
-        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
-    print("Авто-проверка остановлена.")
+                    await app.bot.send_message(chat_id=chat_id, text=f"📰 {news_title}")
+                    logger.info(f"Новость отправлена пользователю {chat_id}")
+                except Exception as e:
+                    logger.error(f"Ошибка при отправке новости пользователю {chat_id}: {e}")
+        await asyncio.sleep(300)  # 5 минут
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("🛑 Фоновая проверка новостей остановлена.")
+
+
+# -----------------------------------------------
+# Команды Telegram
+# -----------------------------------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    app = context.application
+    bot_data = app.bot_data
     chat_id = update.effective_chat.id
-    app = context.application
-    if not hasattr(app, "chat_ids"):
-        app.chat_ids = set()
-    app.chat_ids.add(chat_id)
-    app.auto_check = True
-    # Запустим задачу (если ещё не запущена)
-    if not hasattr(app, "news_task") or app.news_task.done():
-        app.news_task = asyncio.create_task(check_and_send_news(app))
-    await update.message.reply_text("🚀 Бот активирован. Я пришлю свежие важные новости с анализом.")
 
-async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    app = context.application
-    app.auto_check = False
-    await update.message.reply_text("🛑 Авто-проверка приостановлена. Введите /start для возобновления.")
+    bot_data.setdefault("chat_ids", set()).add(chat_id)
+    bot_data["auto_check"] = True
 
-async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    news = get_latest_news()
-    if not news:
-        await update.message.reply_text("📭 Нет новых новостей прямо сейчас.")
-        return
-    title_ru = translator.translate(news.title)
-    summary_ru = translator.translate(getattr(news, "summary", ""))
-    analysis = analyze_with_gpt(title_ru, summary_ru)
-    log_news(title_ru, summary_ru, analysis)
-    msg = (
-        f"📰 *Новая новость:*\n\n"
-        f"*{title_ru}*\n\n"
-        f"{summary_ru}\n\n"
-        f"🔗 {news.link}\n\n"
-        f"🤖 *Анализ ИИ:*\n{analysis}"
+    # Запускаем фоновую задачу, если она не активна
+    if not bot_data.get("news_task") or bot_data["news_task"].done():
+        bot_data["news_task"] = asyncio.create_task(check_and_send_news(app))
+
+    await update.message.reply_text(
+        "🚀 Привет! Я новостной ИИ-агент.\n"
+        "Я буду присылать важные новости, влияющие на крипторынок.\n"
+        "Чтобы остановить рассылку — используй /stop."
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
 
+
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    app = context.application
+    bot_data = app.bot_data
+    bot_data["auto_check"] = False
+    await update.message.reply_text("🛑 Автоматическая проверка новостей остановлена.")
+
+
+async def news(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать последние новости вручную"""
+    latest = await fetch_latest_news()
+    if latest:
+        await update.message.reply_text(f"📰 Последняя новость: {latest}")
+    else:
+        await update.message.reply_text("⚠️ Не удалось получить новости.")
+
+
+# -----------------------------------------------
+# Основная функция
+# -----------------------------------------------
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("stop", stop_command))
-    app.add_handler(CommandHandler("news", news_command))
-    app.chat_ids = set()
-    app.auto_check = True
-    print("✅ Бот запущен. Ожидаю команды в Telegram...")
-    app.run_polling()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stop", stop))
+    app.add_handler(CommandHandler("news", news))
+
+    # Глобальные данные
+    app.bot_data["chat_ids"] = set()
+    app.bot_data["auto_check"] = True
+    app.bot_data["news_task"] = None
+
+    # Запускаем фоновую задачу
+    loop = asyncio.get_event_loop()
+    if not app.bot_data["news_task"]:
+        app.bot_data["news_task"] = loop.create_task(check_and_send_news(app))
+
+    logger.info("✅ Бот успешно запущен. Ожидаю команды в Telegram.")
+    app.run_polling(stop_signals=None)  # чтобы Render не убивал процесс
+
 
 if __name__ == "__main__":
     main()
+
+
