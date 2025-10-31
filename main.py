@@ -10,6 +10,7 @@ from telegram.ext import (
     ContextTypes,
 )
 import aiohttp
+import json
 
 # -----------------------------------------------
 # Загрузка переменных окружения (.env)
@@ -18,8 +19,8 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
-    print("❗ Убедись, что TELEGRAM_TOKEN и OPENAI_API_KEY заданы в .env или в Render → Environment.")
+if not TELEGRAM_TOKEN:
+    print("❗ TELEGRAM_TOKEN не задан")
     exit(1)
 
 # -----------------------------------------------
@@ -34,22 +35,61 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------
 # Фоновая проверка новостей
 # -----------------------------------------------
-async def fetch_latest_news():
+async def fetch_cryptopanic_news():
     """
-    Заглушка: получаем последние новости (в реальности — через API или парсер).
-    Здесь просто возвращаем фиктивную новость.
+    Получает новости с CryptoPanic - нашего главного источника!
     """
-    url = "https://api.currentsapi.services/v1/latest-news?language=en&apiKey=demo"
+    if not CRYPTOPANIC_API_KEY:
+        logger.warning("❌ CRYPTOPANIC_API_KEY не задан - пропускаем CryptoPanic")
+        return None
+    
+    # URL для получения важных новостей
+    url = f"https://cryptopanic.com/api/v1/posts/?auth_token={CRYPTOPANIC_API_KEY}&kind=news&filter=important"
+    
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as resp:
-                data = await resp.json()
-                if "news" in data and len(data["news"]) > 0:
-                    return data["news"][0]["title"]
-                return "No news found."
+                if resp.status == 200:
+                    data = await resp.json()
+                    print("✅ Данные от CryptoPanic получены!")  # Для отладки
+                    
+                    # Проверяем, есть ли новости
+                    if "results" in data and len(data["results"]) > 0:
+                        latest_news = data["results"][0]  # Берем самую свежую новость
+                        
+                        # Формируем удобную структуру
+                        return {
+                            "title": latest_news.get("title", "Без заголовка"),
+                            "url": latest_news.get("url", ""),
+                            "source": "CryptoPanic",
+                            "sentiment": latest_news.get("sentiment", "neutral"),  # bullish/bearish/neutral
+                            "published_at": latest_news.get("published_at", "")
+                        }
+                    else:
+                        print("ℹ️ Новостей нет в ответе")
+                        return None
+                else:
+                    print(f"❌ Ошибка HTTP: {resp.status}")
+                    return None
+                    
     except Exception as e:
-        logger.error(f"Ошибка при получении новостей: {e}")
+        logger.error(f"Ошибка при получении новостей с CryptoPanic: {e}")
         return None
+async def fetch_latest_news():
+    """
+    Главная функция - получает новости из ВСЕХ источников
+    """
+    print("🔍 Ищу свежие новости...")
+    
+    # Пробуем получить новости с CryptoPanic (наш главный источник)
+    crypto_news = await fetch_cryptopanic_news()
+    if crypto_news:
+        print(f"✅ Найдена крипто-новость: {crypto_news['title'][:50]}...")
+        return crypto_news
+    
+    # Если CryptoPanic не сработал, можно добавить другие источники позже
+    print("ℹ️ Новостей с CryptoPanic нет")
+    return None
 
 
 async def check_and_send_news(app):
@@ -137,5 +177,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
